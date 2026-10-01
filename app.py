@@ -9,6 +9,7 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
+# Ancho de tolva de referencia en cm según modelo de camión
 ANCHO_TOLVA_CM = {
     "komatsu 830": 850.0,
     "cat 793": 890.0,
@@ -16,7 +17,7 @@ ANCHO_TOLVA_CM = {
 }
 
 def generar_curva_wipfrag(diametros_cm):
-    """Genera la gráfica acumulada tipo WipFrag y la devuelve en Base64."""
+    """Genera la gráfica acumulada tipo WipFrag e histograma y la devuelve en Base64."""
     diametros_in = np.array(diametros_cm) / 2.54
     diametros_sorted = np.sort(diametros_in)
     p_pasando = np.arange(1, len(diametros_sorted) + 1) / len(diametros_sorted) * 100
@@ -53,25 +54,25 @@ def analizar_granulometria():
 
     imagen_bytes = None
 
-    # 1. Buscar en multipart/form-data (request.files)
+    # 1. Buscar imagen si llega mediante multipart/form-data
     if request.files:
         primer_key = list(request.files.keys())[0]
         print(f"--> Imagen detectada en request.files['{primer_key}']")
         imagen_bytes = request.files[primer_key].read()
 
-    # 2. Buscar en datos binarios directos (Web1.PostFile de App Inventor)
+    # 2. Buscar imagen si llega como flujo binario directo (Web1.PostFile)
     elif request.data and len(request.data) > 0:
         print(f"--> Imagen detectada en request.data ({len(request.data)} bytes)")
         imagen_bytes = request.data
 
-    # Si no se detectaron bytes de imagen
+    # Error si no se recibieron datos de imagen
     if not imagen_bytes or len(imagen_bytes) == 0:
         mensaje_error = f"No se recibio ninguna imagen. Content-Type: {request.content_type}, Data Size: {len(request.data) if request.data else 0}"
         print(f"ERROR: {mensaje_error}")
         return jsonify({"error": mensaje_error}), 400
 
     try:
-        # Decodificar la imagen a formato OpenCV
+        # Decodificar imagen para OpenCV
         nparr = np.frombuffer(imagen_bytes, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -79,11 +80,11 @@ def analizar_granulometria():
             print("ERROR: OpenCV no pudo decodificar la imagen.")
             return jsonify({"error": "No se pudo decodificar la imagen (formato no valido o corrupto)"}), 400
 
-        # Obtener modelo de camión desde el parámetro URL (por defecto komatsu 830)
+        # Obtener camión de la URL para la escala física
         camion = request.args.get('camion', 'komatsu 830').lower()
         ancho_cm = ANCHO_TOLVA_CM.get(camion, 850.0)
 
-        # Procesamiento con OpenCV
+        # Escalamiento y procesamiento de la imagen
         ancho_px = img.shape[1]
         pixeles_por_cm = ancho_px / ancho_cm
 
@@ -99,7 +100,7 @@ def analizar_granulometria():
         diametros_cm = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area > 10:  # Filtrar ruido
+            if area > 10:  # Descartar ruido
                 diametro_px = 2 * np.sqrt(area / np.pi)
                 diametros_cm.append(diametro_px / pixeles_por_cm)
 
@@ -114,7 +115,7 @@ def analizar_granulometria():
         p50_cm = float(np.percentile(diametros_cm, 50))
         p20_cm = float(np.percentile(diametros_cm, 20))
 
-        # Generar gráfica Base64
+        # Generar gráfico Base64
         grafico_b64 = generar_curva_wipfrag(diametros_cm)
 
         print("--> PROCESAMIENTO EXITOSO")
@@ -132,7 +133,7 @@ def analizar_granulometria():
 
     except Exception as e:
         print(f"EXCEPCION EN EL SERVIDOR: {str(e)}")
-        return jsonify({"error": f"Excepción en servidor: {str(e)}"}), 500
+        return jsonify({"error": f"Excepcion en servidor: {str(e)}"}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
