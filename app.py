@@ -1,211 +1,264 @@
-import os
 import base64
-import io
 import cv2
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-from flask import Flask, request, jsonify, send_file
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# Ancho de tolva de referencia en cm (6860 mm = 686.0 cm)
+# Ancho de tolva de referencia en cm según modelo de camión (6860 mm = 686.0 cm)
 ANCHO_TOLVA_CM = {
     "komatsu 830": 686.0,
     "cat 793": 890.0,
-    "general": 686.0
+    "general": 686.0,
 }
 
-@app.route('/analizar_granulometria', methods=['POST'])
+
+@app.route("/", methods=["GET"])
+def index():
+    return (
+        jsonify(
+            {
+                "estado": "Servidor de Granulometría CAEX Activo",
+                "version": "2.2",
+            }
+        ),
+        200,
+    )
+
+
+@app.route("/analizar_granulometria", methods=["POST"])
 def analizar_granulometria():
-    print("\n=================== NUEVA PETICION RECIBIDA ===================")
-    print(f"Content-Type: {request.content_type}")
-    print(f"Archivos en request.files: {list(request.files.keys())}")
-    print(f"Tamaño de request.data: {len(request.data) if request.data else 0} bytes")
-    print("===============================================================\n")
+  print("\n=================== NUEVA PETICION RECIBIDA ===================")
+  print(f"Content-Type: {request.content_type}")
 
-    archivos = []
+  archivos = []
 
-    # 1. Capturar si viene por multipart/form-data
-    if request.files:
-        for key in request.files:
-            archivos.extend(request.files.getlist(key))
+  try:
+    # 1. Intentar capturar si viene en formato JSON con Base64 (Recomendado para Android moderno)
+    if request.is_json:
+      data = request.get_json()
+      if "imagen_base64" in data:
+        img_str = data["imagen_base64"]
+        if "," in img_str:
+          img_str = img_str.split(",")[1]
+        img_bytes = base64.b64decode(img_str)
+        archivos.append(img_bytes)
 
-    # 2. Si request.files está vacío, capturar el flujo binario directo
-    if not archivos and request.data and len(request.data) > 0:
-        archivos = [request.data]
+    # 2. Intentar capturar si viene como multipart/form-data tradicional
+    elif request.files:
+      for key in request.files:
+        for file_storage in request.files.getlist(key):
+          archivos.append(file_storage.read())
+
+    # 3. Respaldo por si llega como flujo binario directo en request.data
+    elif request.data and len(request.data) > 0:
+      archivos.append(request.data)
 
     if not archivos or len(archivos) == 0:
-        return jsonify({"error": "No se recibió ninguna imagen."}), 400
+      print("Error: No se encontró ninguna imagen en la petición.")
+      return (
+          jsonify({"error": "No se recibió ninguna imagen para procesar."}),
+          400,
+      )
 
-    camion = request.args.get('camion', 'komatsu 830').lower()
-    malla = request.args.get('malla', 'malla_1').lower()
+    camion = request.args.get("camion", "komatsu 830").lower()
     ancho_cm = ANCHO_TOLVA_CM.get(camion, 686.0)
 
     todos_diametros_cm = []
     resultados_individuales = []
 
-    for idx, archivo in enumerate(archivos):
-        if hasattr(archivo, 'read'):
-            file_bytes = np.frombuffer(archivo.read(), np.uint8)
+    for idx, img_bytes in enumerate(archivos):
+      # Decodificar bytes a imagen OpenCV
+      np_arr = np.frombuffer(img_bytes, np.uint8)
+      img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+      if img is None:
+        continue
+
+      alto_px, ancho_px = img.shape[:2]
+      pixeles_por_cm = ancho_px / ancho_cm
+
+      # Procesamiento de imagen para segmentación de clastos
+      gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+      blur = cv2.GaussianBlur(gray, (7, 7), 0)
+      _, thresh = cv2.threshold(
+          blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+      )
+
+      kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+      opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+
+      contours, _ = cv2.findContours(
+          opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+      )
+
+      diametros_img = []
+      valid_contours = []
+      for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area > 10:
+          diametro_px = 2 * np.sqrt(area / np.pi)
+          d_cm = diametro_px / pixeles_por_cm
+          diametros_img.append(d_cm)
+          todos_diametros_cm.append(d_cm)
+          valid_contours.append((cnt, area))
+
+      # Ordenar clastos por área (los más grandes al fondo)
+      valid_contours = sorted(valid_contours, key=lambda x: x[1], reverse=True)
+
+      img_clastos = img.copy()
+
+      # Rellenar clastos con estilo WipFrag (colores según tamaño)
+      for cnt, area in valid_contours:
+        d_cm = (2 * np.sqrt(area / np.pi)) / pixeles_por_cm
+
+        if d_cm > 80:
+          color = (0, 128, 255)  # Naranjo para bloques grandes
+        elif d_cm > 40:
+          color = (0, 255, 0)  # Verde para tamaño mediano
         else:
-            file_bytes = np.frombuffer(archivo, np.uint8)
+          color = (0, 255, 255)  # Amarillo para clastos finos
 
-        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        if img is None:
-            continue
+        cv2.drawContours(img_clastos, [cnt], -1, color, thickness=cv2.FILLED)
+        cv2.drawContours(
+            img_clastos, [cnt], -1, (50, 50, 50), thickness=1
+        )  # Borde
 
-        ancho_px = img.shape[1]
-        alto_px = img.shape[0]
-        pixeles_por_cm = ancho_px / ancho_cm
+      # --- DIBUJAR LÍNEA DE COTA LATERAL (6860 mm) ---
+      x_cota = int(ancho_px * 0.88)
+      y_inicio_cota = int(alto_px * 0.15)
+      y_fin_cota = int(alto_px * 0.85)
 
-        # Procesamiento de imagen con OpenCV
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (7, 7), 0)
-        _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+      # Línea vertical principal roja
+      cv2.line(
+          img_clastos,
+          (x_cota, y_inicio_cota),
+          (x_cota, y_fin_cota),
+          (0, 0, 255),
+          3,
+      )
+      # Topes horizontales de la cota
+      cv2.line(
+          img_clastos,
+          (x_cota - 12, y_inicio_cota),
+          (x_cota + 12, y_inicio_cota),
+          (0, 0, 255),
+          3,
+      )
+      cv2.line(
+          img_clastos,
+          (x_cota - 12, y_fin_cota),
+          (x_cota + 12, y_fin_cota),
+          (0, 0, 255),
+          3,
+      )
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+      # Texto de medida exacta
+      cv2.putText(
+          img_clastos,
+          "6860 mm",
+          (x_cota - 95, int((y_inicio_cota + y_fin_cota) / 2)),
+          cv2.FONT_HERSHEY_SIMPLEX,
+          0.7,
+          (0, 0, 255),
+          2,
+          cv2.LINE_AA,
+      )
+      # -----------------------------------------------
 
-        contours, _ = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+      # Codificar imagen procesada a JPG en base64
+      _, buffer_clastos = cv2.imencode(".jpg", img_clastos)
+      b64_clastos = base64.b64encode(buffer_clastos.getvalue()).decode("utf-8")
 
-        diametros_img = []
-        valid_contours = []
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area > 10:
-                diametro_px = 2 * np.sqrt(area / np.pi)
-                d_cm = diametro_px / pixeles_por_cm
-                diametros_img.append(d_cm)
-                todos_diametros_cm.append(d_cm)
-                valid_contours.append((cnt, area))
+      resultados_individuales.append({
+          "indice": idx + 1,
+          "clastos_detectados": len(diametros_img),
+          "imagen_clastos": b64_clastos,
+      })
 
-        # Ordenar clastos por área (los más grandes primero)
-        valid_contours = sorted(valid_contours, key=lambda x: x[1], reverse=True)
+    # Cálculo de percentiles globales de la carga
+    if len(todos_diametros_cm) > 0:
+      arr_d = np.array(todos_diametros_cm)
+      p99 = float(np.percentile(arr_d, 99))
+      p80 = float(np.percentile(arr_d, 80))
+      p50 = float(np.percentile(arr_d, 50))
+      p20 = float(np.percentile(arr_d, 20))
+    else:
+      p99 = p80 = p50 = p20 = 0.0
 
-        img_clastos = img.copy()
+    # Generación de gráfica combinada de distribución granulométrica (PNG)
+    img_grafico = np.zeros((400, 600, 3), dtype=np.uint8)
+    img_grafico.fill(255)
+    cv2.putText(
+        img_grafico,
+        "Curva Granulometrica - CAEX",
+        (30, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (0, 0, 0),
+        2,
+    )
+    cv2.putText(
+        img_grafico,
+        f"P99: {p99:.1f} cm | P80: {p80:.1f} cm",
+        (30, 90),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (50, 50, 50),
+        2,
+    )
+    cv2.putText(
+        img_grafico,
+        f"P50: {p50:.1f} cm | P20: {p20:.1f} cm",
+        (30, 130),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (50, 50, 50),
+        2,
+    )
+    cv2.putText(
+        img_grafico,
+        f"Tolva Calibrada: {ancho_cm} cm (6860 mm)",
+        (30, 180),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (0, 0, 255),
+        2,
+    )
 
-        # Rellenar clastos con colores simulando el estándar WipFrag
-        for cnt, area in valid_contours:
-            d_cm = (2 * np.sqrt(area / np.pi)) / pixeles_por_cm
-            
-            if d_cm > 80:
-                color = (0, 128, 255)   # Naranjo / Rojo para bloques muy grandes
-            elif d_cm > 40:
-                color = (0, 255, 0)     # Verde para tamaño mediano
-            else:
-                color = (0, 255, 255)   # Amarillo para clastos finos
+    # Dibujar ejes de la curva simulada
+    cv2.line(img_grafico, (50, 320), (550, 320), (0, 0, 0), 2)
+    cv2.line(img_grafico, (50, 220), (50, 320), (0, 0, 0), 2)
+    if len(todos_diametros_cm) > 5:
+      pts = np.array(
+          [[50 + i * 5, 320 - int(min(val * 2, 90))] for i, val in enumerate(np.sort(arr_d)[:100]],
+          np.int32,
+      )
+      if len(pts) > 1:
+        cv2.polylines(img_grafico, [pts], False, (255, 0, 0), 3)
 
-            cv2.drawContours(img_clastos, [cnt], -1, color, thickness=cv2.FILLED)
-            cv2.drawContours(img_clastos, [cnt], -1, (50, 50, 50), thickness=1)
+    _, buffer_grafico = cv2.imencode(".png", img_grafico)
+    b64_grafico = base64.b64encode(buffer_grafico.getvalue()).decode("utf-8")
 
-        # --- LÍNEA DE COTA LATERAL (6860 mm) ---
-        x_cota = int(ancho_px * 0.85)
-        y_inicio_cota = int(alto_px * 0.2)
-        y_fin_cota = int(alto_px * 0.85)
+    response_data = {
+        "p99_cm": f"{p99:.1f}",
+        "p80_cm": f"{p80:.1f}",
+        "p50_cm": f"{p50:.1f}",
+        "p20_cm": f"{p20:.1f}",
+        "grafico_combinado_base64": b64_grafico,
+        "detalles_por_imagen": resultados_individuales,
+    }
 
-        cv2.line(img_clastos, (x_cota, y_inicio_cota), (x_cota, y_fin_cota), (0, 0, 255), 3)
-        cv2.line(img_clastos, (x_cota - 10, y_inicio_cota), (x_cota + 10, y_inicio_cota), (0, 0, 255), 3)
-        cv2.line(img_clastos, (x_cota - 10, y_fin_cota), (x_cota + 10, y_fin_cota), (0, 0, 255), 3)
+    print("Procesamiento exitoso. Retornando JSON al cliente.")
+    return jsonify(response_data), 200
 
-        cv2.putText(img_clastos, "6860 mm", (x_cota - 95, int((y_inicio_cota + y_fin_cota) / 2)), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2, cv2.LINE_AA)
-        # --------------------------------------
+  except Exception as e:
+    print(f"Excepción crítica en el servidor: {str(e)}")
+    import traceback
 
-        _, buffer_clastos = cv2.imencode('.jpg', img_clastos)
-        b64_clastos = base64.b64encode(buffer_clastos.getvalue()).decode('utf-8')
-
-        resultados_individuales.append({
-            "indice": idx + 1,
-            "clastos_detectados": len(diametros_img),
-            "imagen_clastos": b64_clastos
-        })
-
-    if not todos_diametros_cm:
-        return jsonify({"error": "No se pudieron detectar clastos en las imágenes."}), 400
-
-    # Cálculo de percentiles globales
-    todos_diametros_cm.sort()
-    arr = np.array(todos_diametros_cm)
-    p99 = float(np.percentile(arr, 99))
-    p80 = float(np.percentile(arr, 80))
-    p50 = float(np.percentile(arr, 50))
-    p20 = float(np.percentile(arr, 20))
-
-    # Generación de la curva granulométrica global combinada
-    plt.figure(figsize=(6, 4))
-    counts, bin_edges = np.histogram(arr, bins=20, density=True)
-    cdf = np.cumsum(counts * np.diff(bin_edges)) * 100
-    
-    plt.plot(bin_edges[:-1], cdf, color='blue', linewidth=2, label=f'Curva {malla.upper()}')
-    plt.title(f'Curva Granulométrica - {malla.upper()}')
-    plt.xlabel('Tamaño (cm)')
-    plt.ylabel('% Acumulado')
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-    grafico_b64 = base64.b64encode(buf.getvalue()).decode('utf-8')
-    plt.close()
-
-    return jsonify({
-        "malla": malla,
-        "p99_cm": round(p99, 2),
-        "p80_cm": round(p80, 2),
-        "p50_cm": round(p50, 2),
-        "p20_cm": round(p20, 2),
-        "grafico_combinado_base64": grafico_b64,
-        "detalles_por_imagen": resultados_individuales
-    })
-
-
-@app.route('/generar_informe_pdf', methods=['POST'])
-def generar_informe_pdf():
-    data = request.json or {}
-    p99 = data.get('p99_cm', 0)
-    p80 = data.get('p80_cm', 0)
-    p50 = data.get('p50_cm', 0)
-    p20 = data.get('p20_cm', 0)
-    camion = data.get('camion', 'Komatsu 830')
-    malla = data.get('malla', 'Malla 1')
-
-    pdf_buffer = io.BytesIO()
-    c = canvas.Canvas(pdf_buffer, pagesize=letter)
-    
-    # Encabezado
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(50, 750, "INFORME DE GRANULOMETRÍA - CAEX")
-    
-    c.setFont("Helvetica", 10)
-    c.drawString(50, 730, f"Sector / Malla: {malla.upper()}")
-    c.drawString(50, 715, f"Modelo de Camión: {camion}")
-    c.drawString(50, 700, f"Referencia de Tolva: 6860 mm (686.0 cm)")
-    
-    # Resultados
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, 660, "Resultados de Percentiles:")
-    
-    c.setFont("Helvetica", 11)
-    c.drawString(70, 635, f"• P99: {p99} cm")
-    c.drawString(70, 615, f"• P80: {p80} cm")
-    c.drawString(70, 595, f"• P50: {p50} cm")
-    c.drawString(70, 575, f"• P20: {p20} cm")
-    
-    # Pie de página
-    c.setFont("Helvetica-Oblique", 9)
-    c.drawString(50, 50, "Generado automáticamente por el Sistema de Análisis Granulométrico Móvil.")
-
-    c.save()
-    pdf_buffer.seek(0)
-
-    return send_file(pdf_buffer, mimetype='application/pdf', as_attachment=True, download_name=f'Informe_{malla}.pdf')
+    traceback.print_exc()
+    return jsonify({"error": str(e)}), 500
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+  app.run(host="0.0.0.0", port=5000)
