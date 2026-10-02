@@ -1,8 +1,14 @@
 import os
 import base64
+import io
 import cv2
 import numpy as np
-from flask import Flask, request, jsonify
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from flask import Flask, request, jsonify, send_file
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 
 app = Flask(__name__)
 
@@ -130,10 +136,6 @@ def analizar_granulometria():
     p20 = float(np.percentile(arr, 20))
 
     # Generación de la curva granulométrica global combinada
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-
     plt.figure(figsize=(6, 4))
     counts, bin_edges = np.histogram(arr, bins=20, density=True)
     cdf = np.cumsum(counts * np.diff(bin_edges)) * 100
@@ -146,7 +148,6 @@ def analizar_granulometria():
     plt.legend()
     plt.tight_layout()
 
-    import io
     buf = io.BytesIO()
     plt.savefig(buf, format='png')
     buf.seek(0)
@@ -161,6 +162,47 @@ def analizar_granulometria():
         "grafico_combinado_base64": grafico_b64,
         "detalles_por_imagen": resultados_individuales
     })
+
+
+@app.route('/generar_informe_pdf', methods=['POST'])
+def generar_informe_pdf():
+    data = request.json or {}
+    p99 = data.get('p99_cm', 0)
+    p80 = data.get('p80_cm', 0)
+    p50 = data.get('p50_cm', 0)
+    p20 = data.get('p20_cm', 0)
+    camion = data.get('camion', 'Komatsu 830')
+
+    pdf_buffer = io.BytesIO()
+    c = canvas.Canvas(pdf_buffer, pagesize=letter)
+    
+    # Encabezado
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(50, 750, "INFORME DE GRANULOMETRÍA - CAEX")
+    
+    c.setFont("Helvetica", 10)
+    c.drawString(50, 730, f"Modelo de Camión: {camion}")
+    c.drawString(50, 715, f"Referencia de Tolva: 6860 mm (686.0 cm)")
+    
+    # Resultados
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, 680, "Resultados de Percentiles:")
+    
+    c.setFont("Helvetica", 11)
+    c.drawString(70, 655, f"• P99: {p99} cm")
+    c.drawString(70, 635, f"• P80: {p80} cm")
+    c.drawString(70, 615, f"• P50: {p50} cm")
+    c.drawString(70, 595, f"• P20: {p20} cm")
+    
+    # Pie de página
+    c.setFont("Helvetica-Oblique", 9)
+    c.drawString(50, 50, "Generado automáticamente por el Sistema de Análisis Granulométrico Móvil.")
+
+    c.save()
+    pdf_buffer.seek(0)
+
+    return send_file(pdf_buffer, mimetype='application/pdf', as_attachment=True, download_name='Informe_Granulometria.pdf')
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
