@@ -29,7 +29,7 @@ def analizar_granulometria():
 
     archivos = []
 
-    # 1. Intentar capturar si viene por multipart/form-data
+    # 1. Capturar si viene por multipart/form-data
     if request.files:
         for key in request.files:
             archivos.extend(request.files.getlist(key))
@@ -42,13 +42,13 @@ def analizar_granulometria():
         return jsonify({"error": "No se recibió ninguna imagen."}), 400
 
     camion = request.args.get('camion', 'komatsu 830').lower()
+    malla = request.args.get('malla', 'malla_1').lower()
     ancho_cm = ANCHO_TOLVA_CM.get(camion, 686.0)
 
     todos_diametros_cm = []
     resultados_individuales = []
 
     for idx, archivo in enumerate(archivos):
-        # Leer imagen desde archivo multipart o desde bytes directos
         if hasattr(archivo, 'read'):
             file_bytes = np.frombuffer(archivo.read(), np.uint8)
         else:
@@ -140,8 +140,8 @@ def analizar_granulometria():
     counts, bin_edges = np.histogram(arr, bins=20, density=True)
     cdf = np.cumsum(counts * np.diff(bin_edges)) * 100
     
-    plt.plot(bin_edges[:-1], cdf, color='blue', linewidth=2, label='Curva Global')
-    plt.title('Curva Granulométrica Combinada')
+    plt.plot(bin_edges[:-1], cdf, color='blue', linewidth=2, label=f'Curva {malla.upper()}')
+    plt.title(f'Curva Granulométrica - {malla.upper()}')
     plt.xlabel('Tamaño (cm)')
     plt.ylabel('% Acumulado')
     plt.grid(True)
@@ -155,6 +155,7 @@ def analizar_granulometria():
     plt.close()
 
     return jsonify({
+        "malla": malla,
         "p99_cm": round(p99, 2),
         "p80_cm": round(p80, 2),
         "p50_cm": round(p50, 2),
@@ -172,6 +173,7 @@ def generar_informe_pdf():
     p50 = data.get('p50_cm', 0)
     p20 = data.get('p20_cm', 0)
     camion = data.get('camion', 'Komatsu 830')
+    malla = data.get('malla', 'Malla 1')
 
     pdf_buffer = io.BytesIO()
     c = canvas.Canvas(pdf_buffer, pagesize=letter)
@@ -181,18 +183,19 @@ def generar_informe_pdf():
     c.drawString(50, 750, "INFORME DE GRANULOMETRÍA - CAEX")
     
     c.setFont("Helvetica", 10)
-    c.drawString(50, 730, f"Modelo de Camión: {camion}")
-    c.drawString(50, 715, f"Referencia de Tolva: 6860 mm (686.0 cm)")
+    c.drawString(50, 730, f"Sector / Malla: {malla.upper()}")
+    c.drawString(50, 715, f"Modelo de Camión: {camion}")
+    c.drawString(50, 700, f"Referencia de Tolva: 6860 mm (686.0 cm)")
     
     # Resultados
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, 680, "Resultados de Percentiles:")
+    c.drawString(50, 660, "Resultados de Percentiles:")
     
     c.setFont("Helvetica", 11)
-    c.drawString(70, 655, f"• P99: {p99} cm")
-    c.drawString(70, 635, f"• P80: {p80} cm")
-    c.drawString(70, 615, f"• P50: {p50} cm")
-    c.drawString(70, 595, f"• P20: {p20} cm")
+    c.drawString(70, 635, f"• P99: {p99} cm")
+    c.drawString(70, 615, f"• P80: {p80} cm")
+    c.drawString(70, 595, f"• P50: {p50} cm")
+    c.drawString(70, 575, f"• P20: {p20} cm")
     
     # Pie de página
     c.setFont("Helvetica-Oblique", 9)
@@ -201,7 +204,7 @@ def generar_informe_pdf():
     c.save()
     pdf_buffer.seek(0)
 
-    return send_file(pdf_buffer, mimetype='application/pdf', as_attachment=True, download_name='Informe_Granulometria.pdf')
+    return send_file(pdf_buffer, mimetype='application/pdf', as_attachment=True, download_name=f'Informe_{malla}.pdf')
 
 
 if __name__ == '__main__':
