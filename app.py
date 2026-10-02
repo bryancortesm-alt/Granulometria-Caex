@@ -45,100 +45,94 @@ def generar_curva_wipfrag(diametros_cm):
 
 @app.route('/analizar_granulometria', methods=['POST'])
 def analizar_granulometria():
-    print("\n=================== NUEVA PETICION JSON (BASE64) ===================")
+    print("\n=================== NUEVA PETICION MULTI-IMAGEN (MULTIPART) ===================")
     print(f"Content-Type: {request.content_type}")
+    print(f"Archivos en request.files: {list(request.files.keys())}")
     print(f"Parámetros GET (args): {request.args}")
-    print("===================================================================\n")
+    print("===============================================================================\n")
+
+    # Obtener lista de archivos enviados por multipart/form-data
+    archivos = request.files.getlist('file') or request.files.getlist('images')
+    
+    if not archivos and request.files:
+        archivos = list(request.files.values())
+
+    # Fallback si llega un solo archivo binario directo
+    if not archivos and request.data and len(request.data) > 0:
+        archivos = [request.data]
+
+    if not archivos or len(archivos) == 0:
+        return jsonify({"error": "No se recibió ninguna imagen."}), 400
+
+    camion = request.args.get('camion', 'komatsu 830').lower()
+    ancho_cm = ANCHO_TOLVA_CM.get(camion, 850.0)
+
+    todos_diametros_cm = []
+    resultados_individuales = []
 
     try:
-        # Intentar leer los datos JSON enviados por la app
-        data = request.get_json(silent=True)
-        
-        if not data or 'imagenes' not in data:
-            return jsonify({"error": "No se encontró la clave 'imagenes' en formato JSON."}), 400
+        for idx, archivo in enumerate(archivos):
+            if hasattr(archivo, 'read'):
+                imagen_bytes = archivo.read()
+            else:
+                imagen_bytes = archivo
 
-        lista_imagenes_b64 = data['imagenes']
-        
-        if not lista_imagenes_b64 or len(lista_imagenes_b64) == 0:
-            return jsonify({"error": "La lista de imágenes está vacía."}), 400
-
-        # Obtener modelo de camión para la escala física
-        camion = request.args.get('camion', 'komatsu 830').lower()
-        ancho_cm = ANCHO_TOLVA_CM.get(camion, 850.0)
-
-        todos_diametros_cm = []
-        resultados_individuales = []
-
-        for idx, img_b64 in enumerate(lista_imagenes_b64):
-            try:
-                # Limpiar la cabecera data:image si la app la incluye por error
-                if ',' in img_b64:
-                    img_b64 = img_b64.split(',')[1]
-
-                # Decodificar Base64 a bytes y luego a matriz OpenCV
-                imagen_bytes = base64.b64decode(img_b64)
-                nparr = np.frombuffer(imagen_bytes, np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-                if img is None:
-                    continue
-
-                # Escala física para esta imagen
-                ancho_px = img.shape[1]
-                pixeles_por_cm = ancho_px / ancho_cm
-
-                # Procesamiento OpenCV
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                blur = cv2.GaussianBlur(gray, (7, 7), 0)
-                _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-                opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
-
-                contours, _ = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                diametros_img = []
-                valid_contours = []
-                for cnt in contours:
-                    area = cv2.contourArea(cnt)
-                    if area > 10:  # Filtrar ruido
-                        diametro_px = 2 * np.sqrt(area / np.pi)
-                        d_cm = diametro_px / pixeles_por_cm
-                        diametros_img.append(d_cm)
-                        todos_diametros_cm.append(d_cm)
-                        valid_contours.append(cnt)
-
-                # Dibujar contornos individuales en verde
-                img_clastos = img.copy()
-                cv2.drawContours(img_clastos, valid_contours, -1, (0, 255, 0), 2)
-
-                _, buffer_clastos = cv2.imencode('.jpg', img_clastos)
-                b64_clastos = base64.b64encode(buffer_clastos.getvalue()).decode('utf-8')
-
-                resultados_individuales.append({
-                    "indice": idx + 1,
-                    "clastos_detectados": len(diametros_img),
-                    "imagen_clastos": b64_clastos
-                })
-
-            except Exception as ex_img:
-                print(f"Error procesando imagen índice {idx}: {str(ex_img)}")
+            if not imagen_bytes:
                 continue
 
-        if not todos_diametros_cm:
-            return jsonify({"error": "No se detectaron clastos válidos en ninguna de las imágenes enviadas."}), 400
+            nparr = np.frombuffer(imagen_bytes, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-        # --- CÁLCULO DE PERCENTILES GLOBALES ---
+            if img is None:
+                continue
+
+            ancho_px = img.shape[1]
+            pixeles_por_cm = ancho_px / ancho_cm
+
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (7, 7), 0)
+            _, thresh = cv2.threshold(blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=2)
+
+            contours, _ = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            diametros_img = []
+            valid_contours = []
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area > 10:
+                    diametro_px = 2 * np.sqrt(area / np.pi)
+                    d_cm = diametro_px / pixeles_por_cm
+                    diametros_img.append(d_cm)
+                    todos_diametros_cm.append(d_cm)
+                    valid_contours.append(cnt)
+
+            img_clastos = img.copy()
+            cv2.drawContours(img_clastos, valid_contours, -1, (0, 255, 0), 2)
+
+            _, buffer_clastos = cv2.imencode('.jpg', img_clastos)
+            b64_clastos = base64.b64encode(buffer_clastos.getvalue()).decode('utf-8')
+
+            resultados_individuales.append({
+                "indice": idx + 1,
+                "clastos_detectados": len(diametros_img),
+                "imagen_clastos": b64_clastos
+            })
+
+        if not todos_diametros_cm:
+            return jsonify({"error": "No se detectaron clastos válidos en ninguna de las imágenes."}), 400
+
         todos_diametros_cm.sort()
         p99_cm = float(np.percentile(todos_diametros_cm, 99))
         p80_cm = float(np.percentile(todos_diametros_cm, 80))
         p50_cm = float(np.percentile(todos_diametros_cm, 50))
         p20_cm = float(np.percentile(todos_diametros_cm, 20))
 
-        # Generar la curva WipFrag combinada
         grafico_combinado_b64 = generar_curva_wipfrag(todos_diametros_cm)
 
-        print(f"--> PROCESAMIENTO EXITOSO ({len(resultados_individuales)} fotos procesadas)")
+        print(f"--> PROCESAMIENTO EXITOSO ({len(resultados_individuales)} fotos)")
         return jsonify({
             "total_fotos": len(resultados_individuales),
             "total_clastos_analizados": len(todos_diametros_cm),
