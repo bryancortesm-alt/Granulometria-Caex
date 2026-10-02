@@ -2,4 +2,4 @@ Flask
 opencv-python-headless
 numpy
 matplotlib
-gunicorn
+reportlab
