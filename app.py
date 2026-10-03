@@ -16,7 +16,7 @@ ANCHO_TOLVA_CM = {
 def index():
     return jsonify({
         "estado": "Servidor de Granulometria CAEX Activo",
-        "version": "2.6"
+        "version": "2.7"
     }), 200
 
 @app.route("/analizar_granulometria", methods=["POST"])
@@ -27,36 +27,42 @@ def analizar_granulometria():
     archivos = []
     
     try:
-        # 1. Capturar si viene como formulario web (application/x-www-form-urlencoded o multipart/form-data)
+        # Inspeccionar qué claves está enviando App Inventor exactamente
         if request.form:
+            print(f"Claves detectadas en request.form: {list(request.form.keys())}")
             for key in request.form:
                 val = request.form[key]
-                if val and len(val) > 100:  # Asumimos que es una cadena larga en Base64
+                if val:
+                    # Intentar limpiar si viene con prefecto data:image/...;base64,
                     try:
                         limpio = val.split(",")[1] if "," in val else val
-                        archivos.append(base64.b64decode(limpio))
+                        # Verificar si es un base64 válido decodificándolo
+                        decodificado = base64.b64decode(limpio)
+                        if len(decodificado) > 50: # Asegurar que es una imagen o archivo pesado
+                            archivos.append(decodificado)
+                            print(f"¡Imagen capturada exitosamente desde la clave del formulario: '{key}'!")
                     except Exception:
                         pass
 
-        # 2. Capturar si viene como archivos tradicionales (multipart)
+        # Si aún no hay archivos, revisar archivos multipart tradicionales
         if not archivos and request.files:
             for key in request.files:
                 for file_storage in request.files.getlist(key):
                     archivos.append(file_storage.read())
 
-        # 3. Capturar si viene como JSON
+        # Si viene por JSON
         if not archivos and request.is_json:
             data = request.get_json()
             if data:
                 for k, v in data.items():
-                    if isinstance(v, str) and len(v) > 100:
+                    if isinstance(v, str) and len(v) > 50:
                         try:
                             limpio = v.split(",")[1] if "," in v else v
                             archivos.append(base64.b64decode(limpio))
                         except Exception:
                             pass
 
-        # 4. Capturar texto crudo o bytes directos en el cuerpo
+        # Si viene en el cuerpo crudo (request.data)
         if not archivos and request.data:
             cuerpo = request.data.decode('utf-8', errors='ignore').strip()
             if cuerpo:
@@ -67,7 +73,7 @@ def analizar_granulometria():
                     archivos.append(request.data)
 
         if not archivos or len(archivos) == 0:
-            print("Error: No se encontró ningún parámetro de imagen válido en el formulario.")
+            print("Error crítico: Ningún método logró extraer datos de imagen válidos.")
             return jsonify({"error": "No se encontró ninguna imagen en la petición."}), 400
 
         camion = request.args.get('camion', 'komatsu 830').lower()
@@ -81,6 +87,7 @@ def analizar_granulometria():
             img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
             if img is None:
+                print(f"Advertencia: No se pudo decodificar el archivo {idx+1} con OpenCV.")
                 continue
 
             alto_px, ancho_px = img.shape[:2]
