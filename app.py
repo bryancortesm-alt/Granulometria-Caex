@@ -16,7 +16,7 @@ ANCHO_TOLVA_CM = {
 def index():
     return jsonify({
         "estado": "Servidor de Granulometria CAEX Activo",
-        "version": "2.5"
+        "version": "2.6"
     }), 200
 
 @app.route("/analizar_granulometria", methods=["POST"])
@@ -27,35 +27,47 @@ def analizar_granulometria():
     archivos = []
     
     try:
-        # 1. Intentar capturar desde JSON (ej. {"imagen_base64": "..."})
-        if request.is_json:
-            data = request.get_json()
-            if data and "imagen_base64" in data:
-                img_str = data["imagen_base64"]
-                if "," in img_str:
-                    img_str = img_str.split(",")[1]
-                archivos.append(base64.b64decode(img_str))
-        
-        # 2. Intentar capturar si viene como form-data tradicional o archivos
+        # 1. Capturar si viene como formulario web (application/x-www-form-urlencoded o multipart/form-data)
+        if request.form:
+            for key in request.form:
+                val = request.form[key]
+                if val and len(val) > 100:  # Asumimos que es una cadena larga en Base64
+                    try:
+                        limpio = val.split(",")[1] if "," in val else val
+                        archivos.append(base64.b64decode(limpio))
+                    except Exception:
+                        pass
+
+        # 2. Capturar si viene como archivos tradicionales (multipart)
         if not archivos and request.files:
             for key in request.files:
                 for file_storage in request.files.getlist(key):
                     archivos.append(file_storage.read())
 
-        # 3. Intentar capturar si App Inventor mandó el Base64 directamente en el cuerpo crudo (Body)
+        # 3. Capturar si viene como JSON
+        if not archivos and request.is_json:
+            data = request.get_json()
+            if data:
+                for k, v in data.items():
+                    if isinstance(v, str) and len(v) > 100:
+                        try:
+                            limpio = v.split(",")[1] if "," in v else v
+                            archivos.append(base64.b64decode(limpio))
+                        except Exception:
+                            pass
+
+        # 4. Capturar texto crudo o bytes directos en el cuerpo
         if not archivos and request.data:
             cuerpo = request.data.decode('utf-8', errors='ignore').strip()
             if cuerpo:
                 try:
-                    if "," in cuerpo:
-                        cuerpo = cuerpo.split(",")[1]
-                    archivos.append(base64.b64decode(cuerpo))
+                    limpio = cuerpo.split(",")[1] if "," in cuerpo else cuerpo
+                    archivos.append(base64.b64decode(limpio))
                 except Exception:
-                    # Si no era base64, tratamos los bytes directos
                     archivos.append(request.data)
 
         if not archivos or len(archivos) == 0:
-            print("Error: La petición no contenía datos de imagen válidos.")
+            print("Error: No se encontró ningún parámetro de imagen válido en el formulario.")
             return jsonify({"error": "No se encontró ninguna imagen en la petición."}), 400
 
         camion = request.args.get('camion', 'komatsu 830').lower()
