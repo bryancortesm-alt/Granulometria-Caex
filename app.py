@@ -16,32 +16,47 @@ ANCHO_TOLVA_CM = {
 def index():
     return jsonify({
         "estado": "Servidor de Granulometria CAEX Activo",
-        "version": "2.4"
+        "version": "2.5"
     }), 200
 
 @app.route("/analizar_granulometria", methods=["POST"])
 def analizar_granulometria():
     print("\n=================== NUEVA PETICION RECIBIDA ===================")
+    print(f"Content-Type: {request.content_type}")
+    
     archivos = []
     
     try:
+        # 1. Intentar capturar desde JSON (ej. {"imagen_base64": "..."})
         if request.is_json:
             data = request.get_json()
-            if "imagen_base64" in data:
+            if data and "imagen_base64" in data:
                 img_str = data["imagen_base64"]
                 if "," in img_str:
                     img_str = img_str.split(",")[1]
-                img_bytes = base64.b64decode(img_str)
-                archivos.append(img_bytes)
-        elif request.files:
+                archivos.append(base64.b64decode(img_str))
+        
+        # 2. Intentar capturar si viene como form-data tradicional o archivos
+        if not archivos and request.files:
             for key in request.files:
                 for file_storage in request.files.getlist(key):
                     archivos.append(file_storage.read())
-        elif request.data and len(request.data) > 0:
-            archivos.append(request.data)
+
+        # 3. Intentar capturar si App Inventor mandó el Base64 directamente en el cuerpo crudo (Body)
+        if not archivos and request.data:
+            cuerpo = request.data.decode('utf-8', errors='ignore').strip()
+            if cuerpo:
+                try:
+                    if "," in cuerpo:
+                        cuerpo = cuerpo.split(",")[1]
+                    archivos.append(base64.b64decode(cuerpo))
+                except Exception:
+                    # Si no era base64, tratamos los bytes directos
+                    archivos.append(request.data)
 
         if not archivos or len(archivos) == 0:
-            return jsonify({"error": "No se recibió ninguna imagen para procesar."}), 400
+            print("Error: La petición no contenía datos de imagen válidos.")
+            return jsonify({"error": "No se encontró ninguna imagen en la petición."}), 400
 
         camion = request.args.get('camion', 'komatsu 830').lower()
         ancho_cm = ANCHO_TOLVA_CM.get(camion, 686.0)
