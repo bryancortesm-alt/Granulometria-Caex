@@ -2,6 +2,7 @@ import os
 import base64
 import cv2
 import numpy as np
+from urllib.parse import parse_qs
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -16,7 +17,7 @@ ANCHO_TOLVA_CM = {
 def index():
     return jsonify({
         "estado": "Servidor de Granulometria CAEX Activo",
-        "version": "2.7"
+        "version": "2.8"
     }), 200
 
 @app.route("/analizar_granulometria", methods=["POST"])
@@ -27,53 +28,50 @@ def analizar_granulometria():
     archivos = []
     
     try:
-        # Inspeccionar qué claves está enviando App Inventor exactamente
+        # 1. Revisar request.form tradicional
         if request.form:
-            print(f"Claves detectadas en request.form: {list(request.form.keys())}")
             for key in request.form:
                 val = request.form[key]
-                if val:
-                    # Intentar limpiar si viene con prefecto data:image/...;base64,
+                if val and len(val) > 50:
                     try:
                         limpio = val.split(",")[1] if "," in val else val
-                        # Verificar si es un base64 válido decodificándolo
                         decodificado = base64.b64decode(limpio)
-                        if len(decodificado) > 50: # Asegurar que es una imagen o archivo pesado
+                        if len(decodificado) > 50:
                             archivos.append(decodificado)
-                            print(f"¡Imagen capturada exitosamente desde la clave del formulario: '{key}'!")
                     except Exception:
                         pass
 
-        # Si aún no hay archivos, revisar archivos multipart tradicionales
+        # 2. Revisar request.data (por si viene como urlencoded en el cuerpo crudo o texto plano)
+        if not archivos and request.data:
+            cuerpo_bytes = request.data
+            try:
+                cuerpo_str = cuerpo_bytes.decode('utf-8', errors='ignore').strip()
+                # Si viene en formato key=value o key=data:image...
+                if "=" in cuerpo_str:
+                    parsed = parse_qs(cuerpo_str)
+                    for k, vals in parsed.items():
+                        for val in vals:
+                            if len(val) > 50:
+                                limpio = val.split(",")[1] if "," in val else val
+                                decodificado = base64.b64decode(limpio)
+                                if len(decodificado) > 50:
+                                    archivos.append(decodificado)
+                                    print(f"Imagen extraída desde parámetro URL-encoded: {k}")
+                else:
+                    # Intentar base64 directo
+                    limpio = cuerpo_str.split(",")[1] if "," in cuerpo_str else cuerpo_str
+                    archivos.append(base64.b64decode(limpio))
+            except Exception as e:
+                print(f"Error procesando request.data: {e}")
+
+        # 3. Revisar archivos multipart tradicionales
         if not archivos and request.files:
             for key in request.files:
                 for file_storage in request.files.getlist(key):
                     archivos.append(file_storage.read())
 
-        # Si viene por JSON
-        if not archivos and request.is_json:
-            data = request.get_json()
-            if data:
-                for k, v in data.items():
-                    if isinstance(v, str) and len(v) > 50:
-                        try:
-                            limpio = v.split(",")[1] if "," in v else v
-                            archivos.append(base64.b64decode(limpio))
-                        except Exception:
-                            pass
-
-        # Si viene en el cuerpo crudo (request.data)
-        if not archivos and request.data:
-            cuerpo = request.data.decode('utf-8', errors='ignore').strip()
-            if cuerpo:
-                try:
-                    limpio = cuerpo.split(",")[1] if "," in cuerpo else cuerpo
-                    archivos.append(base64.b64decode(limpio))
-                except Exception:
-                    archivos.append(request.data)
-
         if not archivos or len(archivos) == 0:
-            print("Error crítico: Ningún método logró extraer datos de imagen válidos.")
+            print("Error crítico: No se pudo extraer ninguna imagen válida.")
             return jsonify({"error": "No se encontró ninguna imagen en la petición."}), 400
 
         camion = request.args.get('camion', 'komatsu 830').lower()
@@ -87,7 +85,6 @@ def analizar_granulometria():
             img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
             if img is None:
-                print(f"Advertencia: No se pudo decodificar el archivo {idx+1} con OpenCV.")
                 continue
 
             alto_px, ancho_px = img.shape[:2]
